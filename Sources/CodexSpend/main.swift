@@ -197,6 +197,8 @@ struct PriceEstimate {
 }
 
 enum PricingTable {
+    private static let longContextInputThreshold: Int64 = 272_000
+
     static func estimate(for model: String, speed: String, usage: TokenUsage, modelContextWindow: Int64?) -> PriceEstimate {
         guard let rates = rates(for: model, speed: speed, usage: usage, modelContextWindow: modelContextWindow) else {
             return PriceEstimate(cost: CostBreakdown(), rateLabel: "unpriced", hasKnownPrice: false)
@@ -220,6 +222,10 @@ enum PricingTable {
 
         if tier == "fast", let rates = fastRates[canonicalModel] {
             return (rates, "fast")
+        }
+
+        if tier == "flex", longContext, let rates = flexLongContextRates[canonicalModel] {
+            return (rates, "flex long-context")
         }
 
         if tier == "flex", let rates = flexRates[canonicalModel] {
@@ -261,11 +267,7 @@ enum PricingTable {
             return false
         }
 
-        if let modelContextWindow, modelContextWindow > 400_000 {
-            return true
-        }
-
-        return usage.inputTokens > 400_000
+        return usage.inputTokens > longContextInputThreshold
     }
 
     private static let standardRates: [String: PricingRates] = [
@@ -299,6 +301,11 @@ enum PricingTable {
         "gpt-5.4": PricingRates(inputPerMillion: 1.25, cachedInputPerMillion: 0.125, outputPerMillion: 7.50),
         "gpt-5.4-mini": PricingRates(inputPerMillion: 0.375, cachedInputPerMillion: 0.0375, outputPerMillion: 2.25),
         "gpt-5.3-codex": PricingRates(inputPerMillion: 0.875, cachedInputPerMillion: 0.0875, outputPerMillion: 7.00)
+    ]
+
+    private static let flexLongContextRates: [String: PricingRates] = [
+        "gpt-5.5": PricingRates(inputPerMillion: 5.00, cachedInputPerMillion: 0.50, outputPerMillion: 22.50),
+        "gpt-5.4": PricingRates(inputPerMillion: 2.50, cachedInputPerMillion: 0.25, outputPerMillion: 11.25)
     ]
 }
 
@@ -566,10 +573,11 @@ final class Formatters {
 }
 
 enum TrendRenderer {
-    static func render(values: [Double], mode: TrendChartMode, width: Int = 30) -> String {
-        let trimmed = Array(values.suffix(width))
+    static func render(values: [Double], mode: TrendChartMode, width: Int? = nil) -> String {
+        let pointCount = max(width ?? defaultWidth(for: mode), 1)
+        let trimmed = bucket(values, maxPoints: pointCount)
         guard let maxValue = trimmed.max(), maxValue > 0 else {
-            return String(repeating: "0", count: min(max(trimmed.count, 1), width))
+            return String(repeating: "0", count: max(trimmed.count, 1))
         }
 
         let palette: [Character]
@@ -587,6 +595,28 @@ enum TrendRenderer {
             let index = min(Int((normalized * Double(palette.count - 1)).rounded()), palette.count - 1)
             return palette[index]
         })
+    }
+
+    private static func defaultWidth(for mode: TrendChartMode) -> Int {
+        switch mode {
+        case .blocks:
+            return 18
+        case .line, .ascii:
+            return 30
+        }
+    }
+
+    private static func bucket(_ values: [Double], maxPoints: Int) -> [Double] {
+        guard values.count > maxPoints else {
+            return values
+        }
+
+        return (0..<maxPoints).map { index in
+            let start = Int((Double(index) * Double(values.count) / Double(maxPoints)).rounded(.down))
+            let end = Int((Double(index + 1) * Double(values.count) / Double(maxPoints)).rounded(.up))
+            let slice = values[start..<min(max(end, start + 1), values.count)]
+            return slice.max() ?? 0
+        }
     }
 }
 

@@ -22,6 +22,56 @@ The menu can render estimates in USD or EUR. OpenAI API pricing is USD, so EUR
 display uses a cached USD-to-EUR reference rate from Frankfurter and refreshes it
 periodically when the app is running.
 
+## Cost Calculation
+
+Codex Spend calculates an API-equivalent estimate from local Codex `token_count`
+events. It does not call the OpenAI billing API, and it does not know whether a
+given ChatGPT-backed Codex turn used plan credits, business credits, or direct
+API billing.
+
+For each `token_count` event, the app splits usage into four buckets:
+
+- Uncached input tokens: `input_tokens - cached_input_tokens`
+- Cached input tokens: `cached_input_tokens`
+- Visible output tokens: `output_tokens - reasoning_output_tokens`
+- Reasoning output tokens: `reasoning_output_tokens`
+
+The estimated USD cost is:
+
+```text
+(uncached_input_tokens / 1,000,000 * input_rate)
++ (cached_input_tokens / 1,000,000 * cached_input_rate)
++ (visible_output_tokens / 1,000,000 * output_rate)
++ (reasoning_output_tokens / 1,000,000 * output_rate)
+```
+
+Codex can emit multiple `token_count` events while answering one prompt. The app
+prices each event with the model, speed, and context information available for
+that event, then rolls the priced events up into one visible prompt turn.
+
+Rates are hardcoded in `Sources/CodexSpend/main.swift` under `PricingTable`.
+Those rates come from the OpenAI API pricing page. Standard, flex, priority, and
+long-context rates are represented separately when OpenAI publishes different
+prices for those tiers.
+
+Reasoning effort is not a separate price multiplier in this app. OpenAI bills
+reasoning tokens as output tokens, so higher reasoning effort affects cost by
+changing how many reasoning output tokens are generated. The per-token rate is
+still the model's output rate.
+
+Fast mode is estimated with OpenAI priority processing rates when Codex metadata
+or local config exposes a `fast` or `priority` service tier. Flex mode is
+estimated with flex rates when exposed. Otherwise, the app falls back to standard
+rates for the detected model.
+
+For GPT-5.5 and GPT-5.4, long-context pricing is used when the recorded input
+token count is above 272K, matching OpenAI's published threshold for those
+models. Unknown models or tiers are counted for tokens, but their price is marked
+as unpriced and contributes `$0.00` to the estimate.
+
+EUR display is calculated after the USD estimate by multiplying by the cached
+USD-to-EUR reference rate.
+
 Current menu features:
 
 - Today and all-time spend summaries.
@@ -32,10 +82,11 @@ Current menu features:
 - Preferences for currency, thresholds, chart mode, estimate labels, and start at login.
 - Privacy indicator showing local files read and the optional EUR-rate network call.
 
-Pricing references:
+Pricing and FX references:
 
-- OpenAI API pricing: https://platform.openai.com/docs/pricing
-- Codex speed and fast-mode credit multipliers: https://developers.openai.com/codex/speed
+- OpenAI API pricing: https://developers.openai.com/api/docs/pricing
+- OpenAI priority processing: https://developers.openai.com/api/docs/guides/priority-processing
+- OpenAI reasoning guide: https://developers.openai.com/api/docs/guides/reasoning
 - USD/EUR reference rates: https://frankfurter.dev/
 
 ## Requirements
