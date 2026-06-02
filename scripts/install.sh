@@ -11,6 +11,11 @@ LAUNCH_AGENT_PATH="$HOME/Library/LaunchAgents/$LAUNCH_AGENT_ID.plist"
 install_app() {
   "$ROOT_DIR/scripts/build.sh"
   mkdir -p "$HOME/Applications"
+  pkill -x "$APP_NAME" >/dev/null 2>&1 || true
+  for _ in {1..20}; do
+    pgrep -x "$APP_NAME" >/dev/null 2>&1 || break
+    sleep 0.1
+  done
   rm -rf "$APP_PATH"
   cp -R "$ROOT_DIR/dist/$APP_NAME.app" "$APP_PATH"
   open "$APP_PATH"
@@ -39,8 +44,6 @@ install_login_item() {
 PLIST
 
   launchctl bootout "gui/$(id -u)" "$LAUNCH_AGENT_PATH" >/dev/null 2>&1 || true
-  launchctl bootstrap "gui/$(id -u)" "$LAUNCH_AGENT_PATH"
-  launchctl enable "gui/$(id -u)/$LAUNCH_AGENT_ID"
   echo "Installed login item $LAUNCH_AGENT_ID"
 }
 

@@ -464,9 +464,16 @@ final class LoginItemManager {
     }
 
     func setEnabled(_ enabled: Bool) {
+        let currentStatus = status()
         if enabled {
+            guard !currentStatus.isInstalled || !currentStatus.matchesCurrentExecutable else {
+                return
+            }
             install()
         } else {
+            guard currentStatus.isInstalled else {
+                return
+            }
             uninstall()
         }
     }
@@ -495,11 +502,9 @@ final class LoginItemManager {
         </plist>
         """
 
+        runLaunchctl(["bootout", "gui/\(getuid())", launchAgentURL.path])
         try? fileManager.createDirectory(at: launchAgentURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? plist.write(to: launchAgentURL, atomically: true, encoding: .utf8)
-        runLaunchctl(["bootout", "gui/\(getuid())", launchAgentURL.path])
-        runLaunchctl(["bootstrap", "gui/\(getuid())", launchAgentURL.path])
-        runLaunchctl(["enable", "gui/\(getuid())/\(label)"])
     }
 
     private func uninstall() {
@@ -2134,6 +2139,18 @@ final class PreferencesWindowController: NSWindowController {
 if CommandLine.arguments.contains("--print-summary") {
     print(CodexUsageStore().loadSnapshot().plainTextSummary(currency: CurrencyStore().load()))
     exit(EXIT_SUCCESS)
+}
+
+if let bundleIdentifier = Bundle.main.bundleIdentifier {
+    let currentPID = ProcessInfo.processInfo.processIdentifier
+    let existingInstances = NSRunningApplication
+        .runningApplications(withBundleIdentifier: bundleIdentifier)
+        .filter { $0.processIdentifier != currentPID && !$0.isTerminated }
+
+    if let existingInstance = existingInstances.first {
+        existingInstance.activate(options: [])
+        exit(EXIT_SUCCESS)
+    }
 }
 
 let app = NSApplication.shared
