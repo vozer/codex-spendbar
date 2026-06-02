@@ -22,6 +22,8 @@ The menu can render estimates in USD or EUR. OpenAI API pricing is USD, so EUR
 display uses a cached USD-to-EUR reference rate from Frankfurter and refreshes it
 periodically when the app is running.
 
+![Codex Spend menu bar showing Today, Trend, All Time, and breakdown menus](docs/menu-screenshot.png)
+
 ## Cost Calculation
 
 Codex Spend calculates an API-equivalent estimate from local Codex `token_count`
