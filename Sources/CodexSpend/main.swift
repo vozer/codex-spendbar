@@ -44,6 +44,26 @@ struct CostBreakdown {
     }
 }
 
+struct CreditBreakdown {
+    var uncachedInput: Double = 0
+    var cachedInput: Double = 0
+    var visibleOutput: Double = 0
+    var reasoningOutput: Double = 0
+
+    var total: Double {
+        uncachedInput + cachedInput + visibleOutput + reasoningOutput
+    }
+
+    mutating func add(_ other: CreditBreakdown) {
+        uncachedInput += other.uncachedInput
+        cachedInput += other.cachedInput
+        visibleOutput += other.visibleOutput
+        reasoningOutput += other.reasoningOutput
+    }
+}
+
+let monthlyCreditBudgetCredits: Double = 7000
+
 struct RequestUsage {
     let timestamp: Date
     let turnID: String
@@ -56,8 +76,11 @@ struct RequestUsage {
     let planType: String
     let usage: TokenUsage
     let cost: CostBreakdown
+    let credits: CreditBreakdown
     let rateLabel: String
+    let creditRateLabel: String
     let hasKnownPrice: Bool
+    let hasKnownCreditPrice: Bool
 }
 
 struct ThreadMeta {
@@ -72,14 +95,20 @@ struct UsageAggregate {
     var requests: Int = 0
     var usage = TokenUsage()
     var cost = CostBreakdown()
+    var credits = CreditBreakdown()
     var unknownPriceRequests: Int = 0
+    var unknownCreditPriceRequests: Int = 0
 
     mutating func add(_ request: RequestUsage) {
         requests += 1
         usage.add(request.usage)
         cost.add(request.cost)
+        credits.add(request.credits)
         if !request.hasKnownPrice {
             unknownPriceRequests += 1
+        }
+        if !request.hasKnownCreditPrice {
+            unknownCreditPriceRequests += 1
         }
     }
 }
@@ -123,6 +152,8 @@ struct ProjectSummary {
 
 struct SpendSnapshot {
     let generatedAt: Date
+    let currentMonthStart: Date
+    let currentMonth: UsageAggregate
     let days: [DaySummary]
     let today: UsageAggregate
     let allTime: UsageAggregate
@@ -137,8 +168,14 @@ struct SpendSnapshot {
     let filesScanned: Int
 
     static func empty(generatedAt: Date = Date()) -> SpendSnapshot {
-        SpendSnapshot(
+        let calendar = Calendar.autoupdatingCurrent
+        let currentMonthStart = calendar.date(
+            from: calendar.dateComponents([.year, .month], from: generatedAt)
+        ) ?? calendar.startOfDay(for: generatedAt)
+        return SpendSnapshot(
             generatedAt: generatedAt,
+            currentMonthStart: currentMonthStart,
+            currentMonth: UsageAggregate(),
             days: [],
             today: UsageAggregate(),
             allTime: UsageAggregate(),
@@ -159,6 +196,16 @@ struct SpendSnapshot {
         lines.append("Codex Spend")
         lines.append("Generated: \(Formatters.fullDateTime.string(from: generatedAt))")
         lines.append("Currency: \(currency.code.rawValue)")
+        lines.append("Current month: \(Formatters.credits(currentMonth.credits.total)) credits spent · \(Formatters.money(currentMonth.cost.total, currency: currency))")
+        let remainingCredits = monthlyCreditBudgetCredits - currentMonth.credits.total
+        if remainingCredits < 0 {
+            lines.append("Over budget: \(Formatters.credits(abs(remainingCredits))) credits")
+        } else {
+            lines.append("Remaining budget: \(Formatters.credits(remainingCredits)) credits of \(Formatters.credits(monthlyCreditBudgetCredits))")
+        }
+        if currentMonth.unknownCreditPriceRequests > 0 {
+            lines.append("Unpriced credit requests: \(currentMonth.unknownCreditPriceRequests)")
+        }
         lines.append("Today: \(Formatters.money(today.cost.total, currency: currency)) · \(Formatters.tokens(today.usage.totalTokens)) tokens · \(today.requests) turns")
         lines.append("All time: \(Formatters.money(allTime.cost.total, currency: currency)) · \(Formatters.tokens(allTime.usage.totalTokens)) tokens · \(allTime.requests) turns")
         lines.append("Today categories:")
@@ -171,7 +218,7 @@ struct SpendSnapshot {
             lines.append("  \(Formatters.shortDay.string(from: day.date)): \(Formatters.money(day.aggregate.cost.total, currency: currency)) · \(Formatters.tokens(day.aggregate.usage.totalTokens)) · \(day.aggregate.requests) turns")
         }
         lines.append("Recent months:")
-        for month in months.prefix(12) {
+        for month in months.filter({ $0.monthStart != currentMonthStart }).prefix(12) {
             lines.append("  \(Formatters.month.string(from: month.monthStart)): \(Formatters.money(month.aggregate.cost.total, currency: currency)) · \(Formatters.tokens(month.aggregate.usage.totalTokens)) · \(month.aggregate.requests) turns")
         }
         lines.append("By model:")
@@ -317,6 +364,78 @@ enum PricingTable {
         "gpt-5.5": PricingRates(inputPerMillion: 5.00, cachedInputPerMillion: 0.50, outputPerMillion: 22.50),
         "gpt-5.4": PricingRates(inputPerMillion: 2.50, cachedInputPerMillion: 0.25, outputPerMillion: 11.25)
     ]
+}
+
+enum CreditPricingTable {
+    static func estimate(for model: String, planType: String, usage: TokenUsage) -> CreditEstimate {
+        guard let rates = rates(for: model, planType: planType) else {
+            return CreditEstimate(credits: CreditBreakdown(), rateLabel: "unpriced", hasKnownPrice: false)
+        }
+
+        let million = 1_000_000.0
+        let credits = CreditBreakdown(
+            uncachedInput: Double(usage.uncachedInputTokens) / million * rates.rates.inputPerMillion,
+            cachedInput: Double(usage.cachedInputTokens) / million * rates.rates.cachedInputPerMillion,
+            visibleOutput: Double(usage.visibleOutputTokens) / million * rates.rates.outputPerMillion,
+            reasoningOutput: Double(usage.reasoningOutputTokens) / million * rates.rates.outputPerMillion
+        )
+
+        return CreditEstimate(credits: credits, rateLabel: rates.label, hasKnownPrice: true)
+    }
+
+    private static func rates(for model: String, planType: String) -> (rates: PricingRates, label: String)? {
+        let canonicalModel = canonical(model, planType: planType)
+        switch canonicalModel {
+        case "gpt-image-2:image":
+            return (PricingRates(inputPerMillion: 200.00, cachedInputPerMillion: 50.00, outputPerMillion: 750.00), "image")
+        case "gpt-image-2:text":
+            return (PricingRates(inputPerMillion: 125.00, cachedInputPerMillion: 31.25, outputPerMillion: 250.00), "text")
+        case "gpt-5.5":
+            return (PricingRates(inputPerMillion: 125.00, cachedInputPerMillion: 12.50, outputPerMillion: 750.00), "standard")
+        case "gpt-5.4":
+            return (PricingRates(inputPerMillion: 62.50, cachedInputPerMillion: 6.25, outputPerMillion: 375.00), "standard")
+        case "gpt-5.4-mini":
+            return (PricingRates(inputPerMillion: 18.75, cachedInputPerMillion: 1.875, outputPerMillion: 113.00), "standard")
+        case "gpt-5.3-codex-spark":
+            return nil
+        default:
+            return nil
+        }
+    }
+
+    private static func canonical(_ model: String, planType: String) -> String {
+        let lower = model.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let plan = planType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+        if lower.contains("gpt-image-2") {
+            let imageHint = lower.contains("(image)") || lower.contains(":image") || lower.contains(" image ") || lower.hasSuffix(" image") || plan.contains("image")
+            let textHint = lower.contains("(text)") || lower.contains(":text") || lower.contains(" text ") || lower.hasSuffix(" text") || plan.contains("text")
+
+            if imageHint && !textHint {
+                return "gpt-image-2:image"
+            }
+            if textHint && !imageHint {
+                return "gpt-image-2:text"
+            }
+            return "gpt-image-2:text"
+        }
+
+        if lower.hasPrefix("gpt-5.1-codex-max") {
+            return "gpt-5.1-codex"
+        }
+
+        if lower.contains("spark") {
+            return "gpt-5.3-codex-spark"
+        }
+
+        return lower
+    }
+}
+
+struct CreditEstimate {
+    let credits: CreditBreakdown
+    let rateLabel: String
+    let hasKnownPrice: Bool
 }
 
 enum CurrencyCode: String, CaseIterable {
@@ -571,6 +690,21 @@ final class Formatters {
         return String(format: "\(symbol)%.2f", converted)
     }
 
+    static func credits(_ value: Double) -> String {
+        if value == 0 {
+            return "0"
+        }
+
+        var formatted = String(format: "%.3f", value)
+        while formatted.contains(".") && formatted.hasSuffix("0") {
+            formatted.removeLast()
+        }
+        if formatted.hasSuffix(".") {
+            formatted.removeLast()
+        }
+        return formatted
+    }
+
     static func tokens(_ value: Int64) -> String {
         let absolute = abs(value)
         if absolute >= 1_000_000 {
@@ -665,6 +799,9 @@ final class CodexUsageStore {
         let now = Date()
         let calendar = Calendar.autoupdatingCurrent
         let todayStart = calendar.startOfDay(for: now)
+        let currentMonthStart = calendar.date(
+            from: calendar.dateComponents([.year, .month], from: now)
+        ) ?? todayStart
         let recentWindowStart = calendar.date(byAdding: .day, value: -(max(recentDays, 1) - 1), to: todayStart) ?? todayStart
 
         let defaultSpeed = readDefaultSpeed()
@@ -755,6 +892,7 @@ final class CodexUsageStore {
         let months = monthlyByStart
             .map { MonthSummary(monthStart: $0.key, aggregate: $0.value) }
             .sorted { $0.monthStart > $1.monthStart }
+        let currentMonth = monthlyByStart[currentMonthStart] ?? UsageAggregate()
 
         let byModel = modelAggregates
             .map { ModelSummary(key: $0.key, aggregate: $0.value) }
@@ -825,6 +963,8 @@ final class CodexUsageStore {
 
         return SpendSnapshot(
             generatedAt: now,
+            currentMonthStart: currentMonthStart,
+            currentMonth: currentMonth,
             days: days,
             today: todayAggregate,
             allTime: allTimeAggregate,
@@ -922,8 +1062,11 @@ final class CodexUsageStore {
         var modelContextWindow: Int64?
         var usage = TokenUsage()
         var cost = CostBreakdown()
+        var credits = CreditBreakdown()
         var rateLabel = ""
+        var creditRateLabel = ""
         var hasKnownPrice = true
+        var hasKnownCreditPrice = true
 
         var hasUsage: Bool {
             usage.totalTokens > 0 || usage.inputTokens > 0 || usage.outputTokens > 0
@@ -1138,6 +1281,11 @@ final class CodexUsageStore {
             usage: usage,
             modelContextWindow: modelContextWindow
         )
+        let creditEstimate = CreditPricingTable.estimate(
+            for: context.pending?.model ?? context.model,
+            planType: planType,
+            usage: usage
+        )
 
         guard var pending = context.pending else {
             return
@@ -1145,12 +1293,19 @@ final class CodexUsageStore {
 
         pending.usage.add(usage)
         pending.cost.add(price.cost)
+        pending.credits.add(creditEstimate.credits)
         pending.timestamp = timestamp
         pending.hasKnownPrice = pending.hasKnownPrice && price.hasKnownPrice
+        pending.hasKnownCreditPrice = pending.hasKnownCreditPrice && creditEstimate.hasKnownPrice
         if pending.rateLabel.isEmpty {
             pending.rateLabel = price.rateLabel
         } else if pending.rateLabel != price.rateLabel {
             pending.rateLabel = "mixed"
+        }
+        if pending.creditRateLabel.isEmpty {
+            pending.creditRateLabel = creditEstimate.rateLabel
+        } else if pending.creditRateLabel != creditEstimate.rateLabel {
+            pending.creditRateLabel = "mixed"
         }
         if !planType.isEmpty {
             pending.planType = planType
@@ -1180,8 +1335,11 @@ final class CodexUsageStore {
             planType: pending.planType,
             usage: pending.usage,
             cost: pending.cost,
+            credits: pending.credits,
             rateLabel: pending.rateLabel.isEmpty ? "unpriced" : pending.rateLabel,
-            hasKnownPrice: pending.hasKnownPrice
+            creditRateLabel: pending.creditRateLabel.isEmpty ? "unpriced" : pending.creditRateLabel,
+            hasKnownPrice: pending.hasKnownPrice,
+            hasKnownCreditPrice: pending.hasKnownCreditPrice
         )
     }
 
@@ -1648,11 +1806,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
         menu.autoenablesItems = false
 
+        addCurrentMonthSection(to: menu)
+        menu.addItem(.separator())
         addTodaySection(to: menu)
         menu.addItem(.separator())
         addTrendSection(to: menu)
         menu.addItem(.separator())
-        addAllTimeSection(to: menu)
+        addAllTimeSubmenu(to: menu)
         menu.addItem(.separator())
         addDaysSubmenu(to: menu)
         addMonthsSubmenu(to: menu)
@@ -1695,6 +1855,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return menu
     }
 
+    private func addCurrentMonthSection(to menu: NSMenu) {
+        let currentMonth = currentSnapshot.currentMonth
+        let spentCredits = currentMonth.credits.total
+        let remainingCredits = monthlyCreditBudgetCredits - spentCredits
+        let overBudget = remainingCredits < 0
+
+        menu.addItem(headerItem("Current Month"))
+        menu.addItem(staticItem(
+            "Period: \(Formatters.shortDay.string(from: currentSnapshot.currentMonthStart)) to now"
+        ))
+        menu.addItem(staticItem(
+            "Spend: \(Formatters.credits(spentCredits)) credits · \(Formatters.money(currentMonth.cost.total, currency: currencyState))\(estimateSuffix)",
+            warning: overBudget
+        ))
+        menu.addItem(staticItem(
+            overBudget
+                ? "Over budget by \(Formatters.credits(abs(remainingCredits))) credits"
+                : "Remaining: \(Formatters.credits(remainingCredits)) credits of \(Formatters.credits(monthlyCreditBudgetCredits))",
+            warning: overBudget
+        ))
+        menu.addItem(staticItem("Turns: \(currentMonth.requests) · Tokens: \(Formatters.tokens(currentMonth.usage.totalTokens))"))
+
+        if currentMonth.unknownCreditPriceRequests > 0 {
+            menu.addItem(staticItem(
+                "\(currentMonth.unknownCreditPriceRequests) requests have no known credit price",
+                warning: true
+            ))
+        }
+
+        if preferences.showEstimateLabels && currentMonth.unknownPriceRequests > 0 {
+            menu.addItem(staticItem("\(currentMonth.unknownPriceRequests) requests have no known USD price"))
+        }
+    }
+
     private func addTodaySection(to menu: NSMenu) {
         let today = currentSnapshot.today
         menu.addItem(headerItem("Today"))
@@ -1734,15 +1928,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(item)
     }
 
-    private func addAllTimeSection(to menu: NSMenu) {
+    private func addAllTimeSubmenu(to menu: NSMenu) {
         let allTime = currentSnapshot.allTime
-        menu.addItem(headerItem("All Time"))
-        menu.addItem(staticItem("Spend: \(Formatters.money(allTime.cost.total, currency: currencyState))\(estimateSuffix)"))
-        menu.addItem(staticItem("Turns: \(allTime.requests) · Tokens: \(Formatters.tokens(allTime.usage.totalTokens))"))
+        let item = NSMenuItem(title: "All Time", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        submenu.autoenablesItems = false
+        submenu.addItem(staticItem("Spend: \(Formatters.money(allTime.cost.total, currency: currencyState))\(estimateSuffix)"))
+        submenu.addItem(staticItem("Turns: \(allTime.requests) · Tokens: \(Formatters.tokens(allTime.usage.totalTokens))"))
 
         if let first = currentSnapshot.firstRequestAt, let last = currentSnapshot.lastRequestAt {
-            menu.addItem(staticItem("Range: \(Formatters.shortDay.string(from: first)) to \(Formatters.shortDay.string(from: last))"))
+            submenu.addItem(staticItem("Range: \(Formatters.shortDay.string(from: first)) to \(Formatters.shortDay.string(from: last))"))
         }
+
+        item.submenu = submenu
+        menu.addItem(item)
     }
 
     private func addDaysSubmenu(to menu: NSMenu) {
@@ -1772,10 +1971,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let submenu = NSMenu()
         submenu.autoenablesItems = false
 
-        if currentSnapshot.months.isEmpty {
+        let historicalMonths = currentSnapshot.months.filter { $0.monthStart != currentSnapshot.currentMonthStart }
+
+        if historicalMonths.isEmpty {
             submenu.addItem(staticItem("No historical usage"))
         } else {
-            for month in currentSnapshot.months {
+            for month in historicalMonths {
                 let aggregate = month.aggregate
                 submenu.addItem(staticItem(
                     "\(Formatters.month.string(from: month.monthStart)): \(Formatters.money(aggregate.cost.total, currency: currencyState)) · \(Formatters.tokens(aggregate.usage.totalTokens)) · \(aggregate.requests) turns"
