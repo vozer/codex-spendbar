@@ -62,9 +62,8 @@ struct CreditBreakdown {
     }
 }
 
-let monthlyCreditBudgetCredits: Double = 7000
+let defaultMonthlyCreditBudgetCredits: Double = 7000
 let monthlyCreditDollarRatePerCredit: Double = 200.0 / 5000.0
-let monthlyCreditBudgetUSD: Double = monthlyCreditBudgetCredits * monthlyCreditDollarRatePerCredit
 
 struct RequestUsage {
     let timestamp: Date
@@ -195,7 +194,12 @@ struct SpendSnapshot {
         )
     }
 
-    func plainTextSummary(currency: CurrencyState = CurrencyStore().load()) -> String {
+    func plainTextSummary(
+        currency: CurrencyState = CurrencyStore().load(),
+        preferences: AppPreferences = PreferencesStore().load()
+    ) -> String {
+        let monthlyCreditBudgetCredits = preferences.monthlyCreditBudgetCredits
+        let monthlyCreditBudgetUSD = monthlyCreditBudgetCredits * monthlyCreditDollarRatePerCredit
         var lines: [String] = []
         lines.append("Codex Spend")
         lines.append("Generated: \(Formatters.fullDateTime.string(from: generatedAt))")
@@ -461,6 +465,7 @@ struct AppPreferences {
     var dailyWarningUSD: Double
     var requestWarningUSD: Double
     var spikeMultiplier: Double
+    var monthlyCreditBudgetCredits: Double
     var chartMode: TrendChartMode
     var showEstimateLabels: Bool
 }
@@ -470,6 +475,7 @@ final class PreferencesStore {
     private let dailyWarningKey = "dailyWarningUSD"
     private let requestWarningKey = "requestWarningUSD"
     private let spikeMultiplierKey = "spikeMultiplier"
+    private let monthlyCreditBudgetKey = "monthlyCreditBudgetCredits"
     private let chartModeKey = "chartMode"
     private let showEstimateLabelsKey = "showEstimateLabels"
 
@@ -477,12 +483,14 @@ final class PreferencesStore {
         let daily = defaults.object(forKey: dailyWarningKey) as? Double ?? 25
         let request = defaults.object(forKey: requestWarningKey) as? Double ?? 3
         let spike = defaults.object(forKey: spikeMultiplierKey) as? Double ?? 2
+        let monthlyCreditBudget = defaults.object(forKey: monthlyCreditBudgetKey) as? Double ?? defaultMonthlyCreditBudgetCredits
         let mode = TrendChartMode(rawValue: defaults.string(forKey: chartModeKey) ?? "") ?? .blocks
         let showLabels = defaults.object(forKey: showEstimateLabelsKey) as? Bool ?? false
         return AppPreferences(
             dailyWarningUSD: max(daily, 0),
             requestWarningUSD: max(request, 0),
             spikeMultiplier: max(spike, 1),
+            monthlyCreditBudgetCredits: max(monthlyCreditBudget, 0),
             chartMode: mode,
             showEstimateLabels: showLabels
         )
@@ -492,6 +500,7 @@ final class PreferencesStore {
         defaults.set(preferences.dailyWarningUSD, forKey: dailyWarningKey)
         defaults.set(preferences.requestWarningUSD, forKey: requestWarningKey)
         defaults.set(preferences.spikeMultiplier, forKey: spikeMultiplierKey)
+        defaults.set(preferences.monthlyCreditBudgetCredits, forKey: monthlyCreditBudgetKey)
         defaults.set(preferences.chartMode.rawValue, forKey: chartModeKey)
         defaults.set(preferences.showEstimateLabels, forKey: showEstimateLabelsKey)
     }
@@ -1893,6 +1902,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func addCurrentMonthSection(to menu: NSMenu) {
         let currentMonth = currentSnapshot.currentMonth
+        let monthlyCreditBudgetCredits = preferences.monthlyCreditBudgetCredits
+        let monthlyCreditBudgetUSD = monthlyCreditBudgetCredits * monthlyCreditDollarRatePerCredit
         let spentCredits = currentMonth.credits.total
         let remainingCredits = monthlyCreditBudgetCredits - spentCredits
         let overBudget = remainingCredits < 0
@@ -2388,6 +2399,7 @@ final class PreferencesWindowController: NSWindowController {
     private let dailyWarningField = NSTextField(frame: .zero)
     private let requestWarningField = NSTextField(frame: .zero)
     private let spikeMultiplierField = NSTextField(frame: .zero)
+    private let monthlyCreditBudgetField = NSTextField(frame: .zero)
     private let showEstimateLabelsCheckbox = NSButton(checkboxWithTitle: "Show estimate labels", target: nil, action: nil)
     private let startAtLoginCheckbox = NSButton(checkboxWithTitle: "Start at login", target: nil, action: nil)
 
@@ -2403,7 +2415,7 @@ final class PreferencesWindowController: NSWindowController {
         self.onSave = onSave
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 390),
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 430),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -2446,6 +2458,7 @@ final class PreferencesWindowController: NSWindowController {
         stack.addArrangedSubview(row("Daily warning threshold (USD equivalent)", dailyWarningField))
         stack.addArrangedSubview(row("Per-request warning threshold (USD equivalent)", requestWarningField))
         stack.addArrangedSubview(row("Spike multiplier", spikeMultiplierField))
+        stack.addArrangedSubview(row("Monthly credit budget", monthlyCreditBudgetField))
         stack.addArrangedSubview(row("Trend chart", chartPopup))
         stack.addArrangedSubview(showEstimateLabelsCheckbox)
         stack.addArrangedSubview(startAtLoginCheckbox)
@@ -2503,6 +2516,7 @@ final class PreferencesWindowController: NSWindowController {
         dailyWarningField.stringValue = String(format: "%.2f", preferences.dailyWarningUSD)
         requestWarningField.stringValue = String(format: "%.2f", preferences.requestWarningUSD)
         spikeMultiplierField.stringValue = String(format: "%.2f", preferences.spikeMultiplier)
+        monthlyCreditBudgetField.stringValue = String(format: "%.0f", preferences.monthlyCreditBudgetCredits)
         showEstimateLabelsCheckbox.state = preferences.showEstimateLabels ? .on : .off
         startAtLoginCheckbox.state = loginItemManager.status().isInstalled ? .on : .off
     }
@@ -2516,6 +2530,7 @@ final class PreferencesWindowController: NSWindowController {
             dailyWarningUSD: max(dailyWarningField.doubleValue, 0),
             requestWarningUSD: max(requestWarningField.doubleValue, 0),
             spikeMultiplier: max(spikeMultiplierField.doubleValue, 1),
+            monthlyCreditBudgetCredits: max(monthlyCreditBudgetField.doubleValue, 0),
             chartMode: chartMode,
             showEstimateLabels: showEstimateLabelsCheckbox.state == .on
         )
