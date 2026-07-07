@@ -63,6 +63,8 @@ struct CreditBreakdown {
 }
 
 let monthlyCreditBudgetCredits: Double = 7000
+let monthlyCreditDollarRatePerCredit: Double = 200.0 / 5000.0
+let monthlyCreditBudgetUSD: Double = monthlyCreditBudgetCredits * monthlyCreditDollarRatePerCredit
 
 struct RequestUsage {
     let timestamp: Date
@@ -154,6 +156,7 @@ struct SpendSnapshot {
     let generatedAt: Date
     let currentMonthStart: Date
     let currentMonth: UsageAggregate
+    let currentMonthUnpricedCreditRequests: [RequestUsage]
     let days: [DaySummary]
     let today: UsageAggregate
     let allTime: UsageAggregate
@@ -176,6 +179,7 @@ struct SpendSnapshot {
             generatedAt: generatedAt,
             currentMonthStart: currentMonthStart,
             currentMonth: UsageAggregate(),
+            currentMonthUnpricedCreditRequests: [],
             days: [],
             today: UsageAggregate(),
             allTime: UsageAggregate(),
@@ -198,13 +202,17 @@ struct SpendSnapshot {
         lines.append("Currency: \(currency.code.rawValue)")
         lines.append("Current month: \(Formatters.credits(currentMonth.credits.total)) credits spent · \(Formatters.money(currentMonth.cost.total, currency: currency))")
         let remainingCredits = monthlyCreditBudgetCredits - currentMonth.credits.total
+        lines.append("Monthly budget: \(Formatters.credits(monthlyCreditBudgetCredits)) credits · \(Formatters.money(monthlyCreditBudgetUSD, currency: currency))")
         if remainingCredits < 0 {
             lines.append("Over budget: \(Formatters.credits(abs(remainingCredits))) credits")
         } else {
-            lines.append("Remaining budget: \(Formatters.credits(remainingCredits)) credits of \(Formatters.credits(monthlyCreditBudgetCredits))")
+            lines.append("Remaining per Month: \(Formatters.credits(remainingCredits)) credits of \(Formatters.credits(monthlyCreditBudgetCredits))")
         }
-        if currentMonth.unknownCreditPriceRequests > 0 {
-            lines.append("Unpriced credit requests: \(currentMonth.unknownCreditPriceRequests)")
+        if !currentMonthUnpricedCreditRequests.isEmpty {
+            lines.append("Unpriced credit requests: \(currentMonthUnpricedCreditRequests.count)")
+            for request in currentMonthUnpricedCreditRequests {
+                lines.append("  \(Formatters.shortTime.string(from: request.timestamp)) · \(request.model.isEmpty ? "unknown model" : request.model) · unpriced")
+            }
         }
         lines.append("Today: \(Formatters.money(today.cost.total, currency: currency)) · \(Formatters.tokens(today.usage.totalTokens)) tokens · \(today.requests) turns")
         lines.append("All time: \(Formatters.money(allTime.cost.total, currency: currency)) · \(Formatters.tokens(allTime.usage.totalTokens)) tokens · \(allTime.requests) turns")
@@ -486,6 +494,28 @@ final class PreferencesStore {
         defaults.set(preferences.spikeMultiplier, forKey: spikeMultiplierKey)
         defaults.set(preferences.chartMode.rawValue, forKey: chartModeKey)
         defaults.set(preferences.showEstimateLabels, forKey: showEstimateLabelsKey)
+    }
+}
+
+final class CalculationStateStore {
+    private let defaults = UserDefaults.standard
+    private let currentMonthAnchorKey = "currentMonthAnchorDate"
+
+    func loadCurrentMonthAnchor() -> Date? {
+        defaults.object(forKey: currentMonthAnchorKey) as? Date
+    }
+
+    func resetCurrentMonthAnchor() {
+        let calendar = Calendar.autoupdatingCurrent
+        let now = Date()
+        let currentMonthStart = calendar.date(
+            from: calendar.dateComponents([.year, .month], from: now)
+        ) ?? calendar.startOfDay(for: now)
+        defaults.set(currentMonthStart, forKey: currentMonthAnchorKey)
+    }
+
+    func clearCurrentMonthAnchor() {
+        defaults.removeObject(forKey: currentMonthAnchorKey)
     }
 }
 
@@ -795,12 +825,13 @@ final class CodexUsageStore {
         pattern: "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
     )
 
-    func loadSnapshot(recentDays: Int = 30) -> SpendSnapshot {
+    func loadSnapshot(recentDays: Int = 30, currentMonthAnchor: Date? = nil) -> SpendSnapshot {
         let now = Date()
         let calendar = Calendar.autoupdatingCurrent
         let todayStart = calendar.startOfDay(for: now)
+        let anchor = currentMonthAnchor ?? now
         let currentMonthStart = calendar.date(
-            from: calendar.dateComponents([.year, .month], from: now)
+            from: calendar.dateComponents([.year, .month], from: anchor)
         ) ?? todayStart
         let recentWindowStart = calendar.date(byAdding: .day, value: -(max(recentDays, 1) - 1), to: todayStart) ?? todayStart
 
@@ -893,6 +924,9 @@ final class CodexUsageStore {
             .map { MonthSummary(monthStart: $0.key, aggregate: $0.value) }
             .sorted { $0.monthStart > $1.monthStart }
         let currentMonth = monthlyByStart[currentMonthStart] ?? UsageAggregate()
+        let currentMonthUnpricedCreditRequests = Array(requests.filter {
+            calendar.isDate($0.timestamp, equalTo: currentMonthStart, toGranularity: .month) && !$0.hasKnownCreditPrice
+        }.reversed())
 
         let byModel = modelAggregates
             .map { ModelSummary(key: $0.key, aggregate: $0.value) }
@@ -965,6 +999,7 @@ final class CodexUsageStore {
             generatedAt: now,
             currentMonthStart: currentMonthStart,
             currentMonth: currentMonth,
+            currentMonthUnpricedCreditRequests: currentMonthUnpricedCreditRequests,
             days: days,
             today: todayAggregate,
             allTime: allTimeAggregate,
@@ -1700,6 +1735,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let store = CodexUsageStore()
     private let currencyStore = CurrencyStore()
+    private let calculationStateStore = CalculationStateStore()
     private let preferencesStore = PreferencesStore()
     private let loginItemManager = LoginItemManager()
     private var refreshTimer: Timer?
@@ -1774,7 +1810,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
 
-            let snapshot = self.store.loadSnapshot()
+            let currentMonthAnchor = self.calculationStateStore.loadCurrentMonthAnchor()
+            let snapshot = self.store.loadSnapshot(currentMonthAnchor: currentMonthAnchor)
 
             DispatchQueue.main.async {
                 self.currentSnapshot = snapshot
@@ -1822,7 +1859,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         addRecentRequestsSubmenu(to: menu)
         addCurrencySubmenu(to: menu)
         addLoginItemSubmenu(to: menu)
-        addPrivacySubmenu(to: menu)
         menu.addItem(.separator())
 
         let copyItem = NSMenuItem(title: "Copy Today's Summary", action: #selector(copySummary), keyEquivalent: "")
@@ -1869,19 +1905,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             "Spend: \(Formatters.credits(spentCredits)) credits · \(Formatters.money(currentMonth.cost.total, currency: currencyState))\(estimateSuffix)",
             warning: overBudget
         ))
-        menu.addItem(staticItem(
+        menu.addItem(importantItem(
             overBudget
                 ? "Over budget by \(Formatters.credits(abs(remainingCredits))) credits"
-                : "Remaining: \(Formatters.credits(remainingCredits)) credits of \(Formatters.credits(monthlyCreditBudgetCredits))",
+                : "Remaining per Month: \(Formatters.credits(remainingCredits)) credits of \(Formatters.credits(monthlyCreditBudgetCredits))",
             warning: overBudget
+        ))
+        menu.addItem(staticItem(
+            "Budget: \(Formatters.credits(monthlyCreditBudgetCredits)) credits · \(Formatters.money(monthlyCreditBudgetUSD, currency: currencyState))"
         ))
         menu.addItem(staticItem("Turns: \(currentMonth.requests) · Tokens: \(Formatters.tokens(currentMonth.usage.totalTokens))"))
 
+        let clearCalculationsItem = NSMenuItem(
+            title: "Clear Calculations and start from first of current month",
+            action: #selector(clearMonthlyCalculations),
+            keyEquivalent: ""
+        )
+        clearCalculationsItem.target = self
+        menu.addItem(clearCalculationsItem)
+
         if currentMonth.unknownCreditPriceRequests > 0 {
-            menu.addItem(staticItem(
-                "\(currentMonth.unknownCreditPriceRequests) requests have no known credit price",
-                warning: true
-            ))
+            let unpricedItem = NSMenuItem(
+                title: "\(currentMonth.unknownCreditPriceRequests) requests have no known credit price",
+                action: nil,
+                keyEquivalent: ""
+            )
+            let unpricedMenu = NSMenu()
+            unpricedMenu.autoenablesItems = false
+            for request in currentSnapshot.currentMonthUnpricedCreditRequests {
+                let model = request.model.isEmpty ? "unknown model" : request.model
+                let details = [
+                    Formatters.shortTime.string(from: request.timestamp),
+                    model,
+                    request.title.isEmpty ? request.turnID : request.title
+                ].joined(separator: " · ")
+                unpricedMenu.addItem(staticItem(details, warning: true))
+            }
+            unpricedItem.submenu = unpricedMenu
+            menu.addItem(unpricedItem)
         }
 
         if preferences.showEstimateLabels && currentMonth.unknownPriceRequests > 0 {
@@ -2126,20 +2187,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(item)
     }
 
-    private func addPrivacySubmenu(to menu: NSMenu) {
-        let item = NSMenuItem(title: "Privacy", action: nil, keyEquivalent: "")
-        let submenu = NSMenu()
-        submenu.autoenablesItems = false
-        submenu.addItem(staticItem("Codex usage is read locally."))
-        submenu.addItem(staticItem("Files: ~/.codex/sessions"))
-        submenu.addItem(staticItem("Files: ~/.codex/archived_sessions"))
-        submenu.addItem(staticItem("Metadata: ~/.codex/state_5.sqlite"))
-        submenu.addItem(staticItem("Network: EUR rate from Frankfurter only"))
-        submenu.addItem(staticItem("No Codex transcript or token data is uploaded."))
-        item.submenu = submenu
-        menu.addItem(item)
-    }
-
     private func addCurrencySubmenu(to menu: NSMenu) {
         let item = NSMenuItem(title: "Currency", action: nil, keyEquivalent: "")
         let submenu = NSMenu()
@@ -2179,6 +2226,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return item
     }
 
+    private func importantItem(_ title: String, warning: Bool = false) -> NSMenuItem {
+        let item = staticItem(title, warning: warning)
+        item.attributedTitle = NSAttributedString(
+            string: title,
+            attributes: [
+                .font: NSFont.boldSystemFont(ofSize: NSFont.systemFontSize),
+                .foregroundColor: warning ? NSColor.systemRed : NSColor.labelColor
+            ]
+        )
+        return item
+    }
+
     private func staticItem(_ title: String, warning: Bool = false) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: #selector(noop), keyEquivalent: "")
         item.target = self
@@ -2196,6 +2255,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func noop() {}
+
+    @objc private func clearMonthlyCalculations() {
+        calculationStateStore.clearCurrentMonthAnchor()
+        calculationStateStore.resetCurrentMonthAnchor()
+        refresh()
+    }
 
     private var estimateSuffix: String {
         preferences.showEstimateLabels ? " estimated" : ""
