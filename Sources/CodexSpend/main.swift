@@ -62,7 +62,7 @@ struct CreditBreakdown {
     }
 }
 
-let defaultMonthlyCreditBudgetCredits: Double = 7000
+let defaultMonthlyCreditBudgetCredits: Double = 7800
 
 struct RequestUsage {
     let timestamp: Date
@@ -499,6 +499,10 @@ enum CreditPricingTable {
             return (PricingRates(inputPerMillion: 50.00, cachedInputPerMillion: 5.00, outputPerMillion: 250.00), "standard")
         case "gpt-6-luna":
             return (PricingRates(inputPerMillion: 2.50, cachedInputPerMillion: 0.25, outputPerMillion: 12.50), "standard")
+        case "gpt-6.1-sol":
+            return (PricingRates(inputPerMillion: 50.00, cachedInputPerMillion: 2.50, outputPerMillion: 250.00), "standard")
+        case "gpt-6.1-terra":
+            return (PricingRates(inputPerMillion: 25.00, cachedInputPerMillion: 1.25, outputPerMillion: 125.00), "standard")
         case "gpt-5.6-sol":
             return (PricingRates(inputPerMillion: 125.00, cachedInputPerMillion: 12.50, outputPerMillion: 750.00), "standard")
         case "gpt-5.6-terra":
@@ -2765,6 +2769,13 @@ if CommandLine.arguments.contains("--check-pricing") {
             precondition(abs(estimate.cost.visibleOutput - 0.015 * (long ? longOutput : output)) < 1e-9)
             precondition(abs(estimate.cost.reasoningOutput - 0.005 * (long ? longOutput : output)) < 1e-9)
         }
+    }
+    for (model, expectedCredits) in [("gpt-6.1-sol", 300.0), ("gpt-6.1-terra", 150.0)] {
+        let usage = TokenUsage(inputTokens: 1_000_000, outputTokens: 1_000_000)
+        let estimate = CreditPricingTable.estimate(for: model, planType: "standard", usage: usage)
+        precondition(estimate.hasKnownPrice, "Missing credit rate: \(model)")
+        precondition(abs(estimate.credits.total - expectedCredits) < 1e-9,
+                     "Incorrect Codex credit rate: \(model)")
     }
     let unsupported = PricingTable.estimate(for: "gpt-6.1-terra", speed: "ultrafast", usage: TokenUsage(), modelContextWindow: nil)
     precondition(!unsupported.hasKnownPrice && unsupported.cost.total == 0)

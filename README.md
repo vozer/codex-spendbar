@@ -64,8 +64,10 @@ The `gpt-5.6` alias is priced as `gpt-5.6-sol`.
 GPT-5.6 Sol uses the current promotional rates, advertised through at least
 November 21, 2026. Rates apply to all matching local sessions, including historical
 sessions; the app does not select rates by event date.
-Codex plan credit rates are separate from API dollar rates. GPT-6.1 Sol credit
-estimates remain unpriced until a credit rate is added from a plan pricing source.
+Codex plan credit rates are separate from API dollar rates. GPT-6.1 Sol and
+Terra credit rates use the published ChatGPT credit rate card. The local default
+monthly budget is 7,800 credits. This is a personal comparison value, not an
+official ChatGPT plan allowance, which varies by plan and usage.
 
 Reasoning effort is not a separate price multiplier in this app. OpenAI bills
 reasoning tokens as output tokens, so higher reasoning effort affects cost by
